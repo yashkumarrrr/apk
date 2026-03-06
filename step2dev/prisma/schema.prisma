@@ -1,0 +1,368 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ── Enums ─────────────────────────────────────────────────────────────────────
+
+enum Plan {
+  FREE
+  PRO
+  TEAM
+}
+
+enum ProjectEnv {
+  DEVELOPMENT
+  STAGING
+  PRODUCTION
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ARCHIVED
+  PAUSED
+}
+
+// ── User ──────────────────────────────────────────────────────────────────────
+
+model User {
+  id             String    @id @default(cuid())
+  name           String
+  email          String    @unique
+  emailVerified  Boolean   @default(false)
+  passwordHash   String?
+  plan           Plan      @default(FREE)
+  avatarUrl      String?
+
+  verifyToken    String?   @unique
+  verifyTokenExp DateTime?
+  resetToken     String?   @unique
+  resetTokenExp  DateTime?
+
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  lastLoginAt    DateTime?
+
+  sessions        Session[]
+  projects        Project[]
+  servers         Server[]
+  metricSnapshots MetricSnapshot[]
+  alertRules      AlertRule[]
+  alerts          Alert[]
+  webhookEvents   WebhookEvent[]
+  notifications   Notification[]
+
+  @@index([email])
+  @@map("users")
+}
+
+// ── Session ───────────────────────────────────────────────────────────────────
+
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  userAgent String?
+  ipAddress String?
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([token])
+  @@index([userId])
+  @@map("sessions")
+}
+
+// ── Project ───────────────────────────────────────────────────────────────────
+
+model Project {
+  id          String        @id @default(cuid())
+  userId      String
+  name        String
+  slug        String
+  description String?
+  env         ProjectEnv    @default(DEVELOPMENT)
+  status      ProjectStatus @default(ACTIVE)
+  color       String        @default("#2563eb")
+  icon        String        @default("⚡")
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  pipelines   Pipeline[]
+
+  @@unique([userId, slug])
+  @@index([userId])
+  @@index([userId, status])
+  @@map("projects")
+}
+
+// ── Pipeline ──────────────────────────────────────────────────────────────────
+
+enum PipelineTrigger {
+  MANUAL
+  PUSH
+  SCHEDULE
+}
+
+enum RunStatus {
+  PENDING
+  RUNNING
+  SUCCESS
+  FAILED
+  CANCELLED
+}
+
+model Pipeline {
+  id          String          @id @default(cuid())
+  projectId   String
+  userId      String
+  name        String
+  repoUrl     String?
+  branch      String          @default("main")
+  trigger     PipelineTrigger @default(MANUAL)
+  stages      Json            // array of stage names
+  enabled     Boolean         @default(true)
+
+  // Auto-trigger config
+  webhookSecret String?       // HMAC secret for GitHub/GitLab webhooks
+  schedule      String?       // cron expression e.g. "0 2 * * *"
+  lastScheduled DateTime?
+
+  // Retry config
+  retryOnFail   Boolean       @default(false)
+  maxRetries    Int           @default(3)
+
+  // Environment variables (stored as JSON array of {key, value, secret})
+  envVars       Json          @default("[]")
+
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  project     Project         @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  runs        PipelineRun[]
+
+  @@index([projectId])
+  @@index([userId])
+  @@map("pipelines")
+}
+
+model PipelineRun {
+  id          String     @id @default(cuid())
+  pipelineId  String
+  userId      String
+  status      RunStatus  @default(PENDING)
+  branch      String     @default("main")
+  commit      String?
+  triggeredBy String     @default("manual")
+  duration    Int?       // seconds
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime   @default(now())
+
+  pipeline    Pipeline   @relation(fields: [pipelineId], references: [id], onDelete: Cascade)
+  logs        PipelineLog[]
+
+  @@index([pipelineId])
+  @@index([userId])
+  @@index([status])
+  @@map("pipeline_runs")
+}
+
+model PipelineLog {
+  id        String   @id @default(cuid())
+  runId     String
+  stage     String
+  message   String
+  level     String   @default("info") // info | success | error | warn
+  seq       Int      @default(0)
+  createdAt DateTime @default(now())
+
+  run       PipelineRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+
+  @@index([runId])
+  @@index([runId, seq])
+  @@map("pipeline_logs")
+}
+
+// ── Server ────────────────────────────────────────────────────────────────────
+
+enum ServerStatus {
+  ONLINE
+  OFFLINE
+  UNKNOWN
+}
+
+enum ServerOs {
+  UBUNTU
+  DEBIAN
+  CENTOS
+  FEDORA
+  ALPINE
+  WINDOWS
+  OTHER
+}
+
+model Server {
+  id           String       @id @default(cuid())
+  userId       String
+  name         String
+  host         String
+  port         Int          @default(22)
+  username     String       @default("root")
+  authType     String       @default("password") // password | key
+  // NOTE: In production, encrypt these. For demo they are stored as-is.
+  password     String?
+  privateKey   String?
+  os           ServerOs     @default(UBUNTU)
+  status       ServerStatus @default(UNKNOWN)
+  tags         String[]     @default([])
+  lastPingedAt DateTime?
+  cpuUsage     Float?
+  memUsage     Float?
+  diskUsage    Float?
+  uptime       Int?         // seconds
+
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, status])
+  @@map("servers")
+}
+
+// ── Monitoring ────────────────────────────────────────────────────────────────
+
+enum AlertSeverity {
+  INFO
+  WARNING
+  CRITICAL
+}
+
+enum AlertState {
+  ACTIVE
+  RESOLVED
+  ACKNOWLEDGED
+}
+
+enum MetricType {
+  CPU
+  MEMORY
+  DISK
+  NETWORK_IN
+  NETWORK_OUT
+  REQUESTS
+  ERROR_RATE
+  LATENCY
+}
+
+model MetricSnapshot {
+  id         String     @id @default(cuid())
+  userId     String
+  serverId   String?
+  type       MetricType
+  value      Float
+  unit       String     @default("%")
+  label      String?
+  recordedAt DateTime   @default(now())
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@index([userId, recordedAt])
+  @@map("metric_snapshots")
+}
+
+model AlertRule {
+  id         String        @id @default(cuid())
+  userId     String
+  name       String
+  metric     MetricType
+  serverId   String?
+  threshold  Float
+  comparator String        @default("gt")
+  severity   AlertSeverity @default(WARNING)
+  enabled    Boolean       @default(true)
+  createdAt  DateTime      @default(now())
+  updatedAt  DateTime      @updatedAt
+
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  alerts     Alert[]
+
+  @@index([userId])
+  @@map("alert_rules")
+}
+
+model Alert {
+  id         String        @id @default(cuid())
+  userId     String
+  ruleId     String?
+  title      String
+  message    String
+  severity   AlertSeverity @default(WARNING)
+  state      AlertState    @default(ACTIVE)
+  metric     MetricType?
+  value      Float?
+  threshold  Float?
+  resolvedAt DateTime?
+  createdAt  DateTime      @default(now())
+
+  user       User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  rule       AlertRule?    @relation(fields: [ruleId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([userId, state])
+  @@index([userId, createdAt])
+  @@map("alerts")
+}
+
+// ── Webhook Events ────────────────────────────────────────────────────────────
+
+model WebhookEvent {
+  id         String   @id @default(cuid())
+  userId     String
+  pipelineId String
+  source     String   @default("github") // github | gitlab | bitbucket
+  event      String                       // push | pull_request | tag
+  branch     String
+  commit     String?
+  actor      String?
+  payload    Json
+  processed  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([pipelineId])
+  @@index([userId])
+  @@map("webhook_events")
+}
+
+// ── Notifications ─────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  type      String   // pipeline_fail | pipeline_success | server_offline | alert_fired | system
+  title     String
+  body      String
+  read      Boolean  @default(false)
+  link      String?  // optional deep-link e.g. /dashboard/pipelines/abc
+  icon      String?  // emoji or icon name
+  createdAt DateTime @default(now())
+
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, read])
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
